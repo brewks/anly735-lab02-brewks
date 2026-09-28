@@ -1,0 +1,310 @@
+---
+title: "Predictive AI Replication Laboratory"
+subtitle: "ANLY 735 – Research Seminar in Predictive AI"
+author: "Ndubuisi Chibuogwu"
+date: September 27, 2026
+format:
+  docx:
+    toc: false
+bibliography: references.bib
+execute:
+  enabled: false
+---
+
+# Study
+
+**Article:** Plasticity Loss in Deep Reinforcement Learning: A Survey
+
+**Authors:** Timo Klein, Christoph Luther, Manus McAuliffe, Lukas Miklautz, Claudia Plant, and Sebastian Tschiatschek
+
+**DOI/URL:** https://arxiv.org/abs/2411.04832
+
+**Replication Type:** Proxy
+
+**Computational Environment:** R
+
+**Primary Packages:** OpenML, nnet, ggplot2, dplyr, tidyr
+
+**Random Seed:** 735
+
+**Repository:** https://github.com/brewks/anly735-lab02-brewks
+
+
+# 1. Research Claim
+
+## What result are you attempting to reproduce?
+
+Klein et al. [-@klein2026] review evidence that neural networks can lose plasticity, meaning their ability to learn and adapt can decline as training conditions change. The survey identifies non-stationary MNIST as a synthetic benchmark for studying this phenomenon, including experiments that introduce changes through label shuffling. This replication examines the narrower claim that prior training can affect a neural network's ability to learn after such a change. A neural-network classifier will first learn the original MNIST task and then encounter a consistent permutation of the class labels. Its post-change learning trajectory will be compared with a freshly initialized model trained on the changed task. Classification accuracy across training epochs will be used to assess new learning and its rate. This distinction is important because a performance drop immediately after a change does not by itself demonstrate loss of plasticity; the model's subsequent ability to learn must also be examined.
+
+# 2. Replication Strategy
+
+## How will you investigate the claim?
+
+This study uses a **proxy replication**. Klein et al. [-@klein2026] is a survey of plasticity-loss research rather than a single experiment with one dataset and implementation to reproduce. The survey, however, identifies non-stationary MNIST and label shuffling as established synthetic approaches for investigating plasticity loss. I therefore use the MNIST dataset and introduce a fixed permutation of its class labels to create a controlled change in the learning task. A model trained before the change will continue learning under the new label mapping, while a freshly initialized model will learn the changed task from scratch. Their post-change accuracy trajectories will then be compared. This differs from reproducing one of the surveyed studies exactly, but it provides a focused test of the broader phenomenon: whether prior training affects a model's capacity and rate of learning after conditions change.
+
+
+# 3. Data
+
+##Description
+
+The replication uses the MNIST handwritten-digit dataset, accessed through OpenML as `mnist_784` (dataset ID 554). Each observation is one 28 × 28 grayscale image of a handwritten digit represented by 784 pixel-intensity features. The target variable is the digit class, ranging from 0 to 9, and the complete dataset contains 70,000 observations. Pixel values are scaled to the range 0–1 before training, and the same training and test partitions are maintained throughout the experiment.  To introduce non-stationarity, the original class labels are replaced after initial training using a fixed permutation of the ten classes. The images and their pixel features remain unchanged while the relationship between the features and target labels changes. This implementation represents the label-shuffling benchmark discussed by Klein et al. [-@klein2026], rather than reproducing one specific experiment from the studies reviewed in the survey.
+
+
+# 4. Method
+
+```{r setup}
+set.seed(735)
+
+library(OpenML)
+library(nnet)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r data-preparation}
+# Load MNIST from OpenML (dataset 554)
+mnist <- getOMLDataSet(data.id = 554)$data
+
+# Separate predictors and target
+x <- as.matrix(mnist[, paste0("pixel", 1:784)])
+y <- factor(mnist$class)
+
+# Scale pixel intensities from 0-255 to 0-1
+x <- x / 255
+
+# Reproducible 80/20 train-test split
+set.seed(735)
+train_id <- sample(seq_len(nrow(x)), size = 0.80 * nrow(x))
+
+x_train <- x[train_id, ]
+x_test  <- x[-train_id, ]
+y_train <- y[train_id]
+y_test  <- y[-train_id]
+
+c(
+  training_observations = nrow(x_train),
+  test_observations = nrow(x_test)
+)
+```
+
+```{r label-permutation}
+# Create a fixed permutation of the 10 MNIST class labels
+set.seed(735)
+
+original_labels <- levels(y)
+permuted_labels <- sample(original_labels)
+
+label_map <- setNames(permuted_labels, original_labels)
+
+# Apply the same new mapping to training and test labels
+y_train_changed <- factor(
+  label_map[as.character(y_train)],
+  levels = original_labels
+)
+
+y_test_changed <- factor(
+  label_map[as.character(y_test)],
+  levels = original_labels
+)
+
+# Display the fixed label mapping
+data.frame(
+  Original = original_labels,
+  Changed = permuted_labels
+)
+```
+
+```{r experiment-sample}
+# Use a reproducible subset for the repeated-learning experiment
+# to keep computation feasible on a standard laptop.
+set.seed(735)
+
+experiment_train_id <- sample(seq_len(nrow(x_train)), 10000)
+experiment_test_id  <- sample(seq_len(nrow(x_test)), 2000)
+
+x_exp_train <- x_train[experiment_train_id, ]
+y_exp_train <- y_train[experiment_train_id]
+y_exp_train_changed <- y_train_changed[experiment_train_id]
+
+x_exp_test <- x_test[experiment_test_id, ]
+y_exp_test <- y_test[experiment_test_id]
+y_exp_test_changed <- y_test_changed[experiment_test_id]
+
+c(
+  experiment_training = nrow(x_exp_train),
+  experiment_test = nrow(x_exp_test)
+)
+```
+
+```{r model-experiment}
+# Helper function for classification accuracy
+accuracy <- function(model, x, y) {
+  pred <- predict(model, x, type = "class")
+  mean(pred == y)
+}
+
+set.seed(735)
+
+# Phase A: learn the original MNIST task
+prior_model <- nnet(
+  x = x_exp_train,
+  y = class.ind(y_exp_train),
+  size = 20,
+  softmax = TRUE,
+  maxit = 30,
+  decay = 0.0001,
+  trace = FALSE,
+  MaxNWts = 20000
+)
+
+original_accuracy <- accuracy(
+  prior_model, x_exp_test, y_exp_test
+)
+
+# Accuracy immediately after labels change, before adaptation
+post_change_accuracy <- accuracy(
+  prior_model, x_exp_test, y_exp_test_changed
+)
+
+# Compare adaptation using increasing training budgets
+budgets <- c(1, 5, 10, 20, 30)
+
+results <- data.frame()
+
+for (b in budgets) {
+
+  # Warm-start from weights learned on original MNIST
+  set.seed(735)
+  warm_model <- nnet(
+    x = x_exp_train,
+    y = class.ind(y_exp_train_changed),
+    size = 20,
+    softmax = TRUE,
+    Wts = prior_model$wts,
+    maxit = b,
+    decay = 0.0001,
+    trace = FALSE,
+    MaxNWts = 20000
+  )
+
+  # Fresh model learns changed task from random initialization
+  set.seed(735)
+  fresh_model <- nnet(
+    x = x_exp_train,
+    y = class.ind(y_exp_train_changed),
+    size = 20,
+    softmax = TRUE,
+    maxit = b,
+    decay = 0.0001,
+    trace = FALSE,
+    MaxNWts = 20000
+  )
+
+  results <- rbind(
+    results,
+    data.frame(
+      Iterations = b,
+      Warm_Start = accuracy(
+        warm_model, x_exp_test, y_exp_test_changed
+      ),
+      Fresh_Start = accuracy(
+        fresh_model, x_exp_test, y_exp_test_changed
+      )
+    )
+  )
+}
+
+cat("Original-task accuracy:", round(original_accuracy, 3), "\n")
+cat("Immediate post-change accuracy:", round(post_change_accuracy, 3), "\n")
+
+results
+```
+
+```{r }
+trajectory <- results |>
+  tidyr::pivot_longer(
+    cols = c(Warm_Start, Fresh_Start),
+    names_to = "Model",
+    values_to = "Accuracy"
+  )
+
+ggplot(
+  trajectory,
+  aes(x = Iterations, y = Accuracy, linetype = Model)
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent
+  ) +
+  labs(
+    title = "Learning After the MNIST Label Change",
+    x = "Training Iterations",
+    y = "Test Accuracy",
+    linetype = "Initialization"
+  ) +
+  theme_minimal()
+```
+The experiment used a feed-forward neural-network classifier implemented with R's `nnet` package. A reproducible subset of 10,000 training and 2,000 test observations was used, with pixel intensities scaled from 0–255 to 0–1. The network contained one hidden layer with 20 units, softmax classification, weight decay of 0.0001, and random seed 735. The model was first trained for 30 iterations on the original MNIST labels to establish prior learning. A fixed permutation of the ten class labels was then introduced as the non-stationary change. Adaptation was evaluated at training budgets of 1, 5, 10, 20, and 30 iterations. At each budget, a warm-start model initialized from the previously trained model's weights was compared with an otherwise equivalent freshly initialized model. Test classification accuracy was recorded to compare their post-change learning trajectories.
+
+
+# 5. Results
+
+| Training Iterations | Warm-Start Accuracy | Fresh-Start Accuracy |
+|---:|---:|---:|
+| 1  | 27.15% | 17.90% |
+| 5  | 47.40% | 38.90% |
+| 10 | 66.60% | 65.10% |
+| 20 | 72.85% | 85.35% |
+| 30 | 83.50% | 88.35% |
+
+The model achieved 87.6% accuracy on the original MNIST task. Immediately after the label permutation, accuracy fell to 19.4%, showing that the change substantially disrupted its previously learned mapping. However, the post-change learning trajectory provides the more relevant evidence about plasticity. The warm-start model initially adapted faster than the fresh model, achieving 27.15% versus 17.90% accuracy after one iteration and 47.40% versus 38.90% after five iterations. By 10 iterations, their performance was similar at 66.60% and 65.10%. The pattern then reversed: at 20 iterations, the fresh model reached 85.35% compared with 72.85% for the warm-start model, and at 30 iterations it remained ahead at 88.35% versus 83.50%. Thus, prior training provided an early learning advantage but did not produce the strongest later adaptation.
+
+
+# 6. Compare
+
+## How closely did your results align with the original study?
+
+| Evidence | Original Study | Replication |
+|---|---|---|
+| Effect of nonstationarity | Non-stationary conditions can contribute to reduced plasticity and require models to adapt to changed learning signals. | Label permutation reduced the previously trained model's accuracy from 87.6% to 19.4% before adaptation. |
+| Post-change learning | Plasticity should be evaluated through the capacity to continue learning under changing conditions. | The warm-start model recovered to 83.5%, demonstrating substantial continued learning capacity. |
+| Warm vs. fresh learning | Prior training can impair subsequent learning relative to fresh initialization under some non-stationary settings. | Warm-start initially learned faster, but fresh-start surpassed it by 20 iterations and finished at 88.35% versus 83.50%. |
+
+The replication provides partial support for the analytical pattern described by Klein et al. [-@klein2026], but the result is more nuanced than a simple loss of learning capacity. The immediate decline from 87.6% to 19.4% demonstrates disruption after the label change, but this alone does not establish plasticity loss. The warm-start model subsequently improved substantially and initially learned the changed task faster than the fresh model. However, the fresh model overtook it between 10 and 20 iterations and ultimately achieved higher accuracy. This later performance gap is consistent with the idea that prior training can constrain subsequent adaptation, while the early warm-start advantage shows that prior learning was not uniformly harmful. Because this is a proxy replication using a specific MNIST label permutation, neural-network architecture, training budget, and sample, the numerical results are not expected to match any individual study reviewed by Klein et al. [-@klein2026]. The evidence therefore supports a conditional rather than universal pattern of reduced plasticity.
+
+# 7. Reproducibility Check
+
+Evaluate the reproducibility of the original study and your own analysis.
+
+- [x] Data source documented
+- [ ] Code runs from beginning to end
+- [x] Computational environment identified
+- [x] Software/packages documented
+- [ ] Package versions documented when relevant
+- [x] Random seed documented when applicable
+- [x] Key preprocessing steps documented
+- [x] Evaluation procedure documented
+- [ ] Repository README provides reproduction instructions
+
+**What was the greatest reproducibility challenge you encountered?**
+
+The greatest reproducibility challenge was translating the broader evidence summarized by Klein et al. [-@klein2026] into a specific experiment that could be reproduced with the available computational resources. The survey identifies non-stationary MNIST and label shuffling as established benchmarks, but it does not provide one standard implementation or numerical result to reproduce. I therefore had to make explicit decisions about the network architecture, label permutation, sample size, training duration, and comparison baseline. Computational cost was also important because repeatedly training neural networks on the full MNIST dataset would make the experiment unnecessarily slow. Using a documented reproducible subset made the learning-trajectory comparison feasible while preserving the central experimental question.
+
+# 8. Extend
+
+## What did the replication reveal that you would investigate next?
+
+A meaningful next step would be to test whether the observed learning pattern changes with the type and severity of non-stationarity. This replication used one fixed permutation of MNIST labels, and the warm-start model initially adapted faster than the fresh model before being overtaken later in training. A follow-up experiment could systematically vary the amount of label change, ranging from a small number of remapped classes to a complete permutation, while keeping the model architecture and training procedure constant. Comparing learning trajectories across these conditions would help determine whether the later warm-start disadvantage becomes larger as the learning task changes more substantially. This extension would add knowledge by testing whether reduced plasticity depends on the magnitude of the distributional change rather than treating plasticity as a simple present-or-absent property.
+
+# Replication Verdict
+
+## Partially Reproduced
+
+The proxy replication partially reproduced the plasticity pattern described by Klein et al. [-@klein2026]. The previously trained model retained substantial capacity to learn after the label permutation and initially adapted faster than the freshly initialized model. However, this advantage did not persist. The fresh model overtook the warm-start model between 10 and 20 training iterations and achieved higher final accuracy (88.35% versus 83.50%). Therefore, the experiment does not support a claim that prior training caused a general inability to learn. Instead, it provides evidence that prior learning altered the subsequent learning trajectory and may have constrained later adaptation under the changed task. Because this experiment tests one MNIST label permutation using a proxy design, the conclusion is limited to this experimental setting rather than the broader theory of plasticity loss.
+
+# References
+
+::: {#refs}
+:::
